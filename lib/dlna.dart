@@ -3,7 +3,10 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:convert';
 import 'dart:typed_data';
-import 'xmlParser.dart';
+
+import 'package:xml/xml.dart';
+
+import 'types.dart';
 
 String removeTrailing(String pattern, String from) {
   int i = from.length;
@@ -33,7 +36,7 @@ String htmlEncode(String text) {
 class DLNADevice {
   final DeviceInfo info;
   final _rendering_control =
-      Set.from(['SetMute', 'GetMute', 'SetVolume', 'GetVolume']);
+      Set.from(['SetMute', 'GetMute', 'SetVolume', 'GetVolume', 'GetVolumeDBRange']);
 
   DLNADevice(this.info);
 
@@ -59,13 +62,15 @@ class DLNADevice {
     return DLNAHttp.post(Uri.parse(controlURL(soapAction)), headers, data);
   }
 
-  Future<String> setUrl(String url,
-      {String title = "", PlayType type = PlayType.Video}) {
-    final data = XmlText.setPlayURLXml(
-      url,
-      title: title,
-      type: type,
-    );
+  Future<String> setUrl(String url, {URIMetadata? metadata}) {
+    if (metadata == null) {
+      metadata = URIMetadata(
+          title: url,
+          res: URIResource(
+            url: url,
+          ));
+    }
+    final data = XmlText.setPlayURLXml(url, metadata: metadata);
     return request('SetAVTransportURI', Utf8Encoder().convert(data));
   }
 
@@ -84,20 +89,16 @@ class DLNADevice {
     return request('Stop', Utf8Encoder().convert(data));
   }
 
-  Future<String> seek(String sk) {
-    final data = XmlText.seekToXml(sk);
-    return request('Seek', Utf8Encoder().convert(data));
+  Future<void> seek(Duration position) async {
+    final data = XmlText.seekToXml(position);
+    final response = await request('Seek', Utf8Encoder().convert(data));
+    print(response);
   }
 
-  Future<String> position() {
+  Future<PositionInfo> position()  async {
     final data = XmlText.getPositionXml();
-    return request('GetPositionInfo', Utf8Encoder().convert(data));
-  }
-
-  Future<String> seekByCurrent(String text, int n) {
-    final p = PositionParser(text);
-    final sk = p.seek(n);
-    return seek(sk);
+    final response = await request('GetPositionInfo', Utf8Encoder().convert(data));
+    return PositionInfo.fromXMLString(response); 
   }
 
   Future<String> getCurrentTransportActions() {
@@ -105,14 +106,16 @@ class DLNADevice {
     return request('GetCurrentTransportActions', Utf8Encoder().convert(data));
   }
 
-  Future<String> getMediaInfo() {
+  Future<MediaInfo> getMediaInfo() async {
     final data = XmlText.getMediaInfoXml();
-    return request('GetMediaInfo', Utf8Encoder().convert(data));
+    final response = await request('GetMediaInfo', Utf8Encoder().convert(data));
+    return MediaInfo.fromXMLString(response);
   }
 
-  Future<String> getTransportInfo() {
+  Future<TransportInfo> getTransportInfo()  async {
     final data = XmlText.getTransportInfoXml();
-    return request('GetTransportInfo', Utf8Encoder().convert(data));
+    String response = await request('GetTransportInfo', Utf8Encoder().convert(data));
+    return TransportInfo.fromXMLString(response);
   }
 
   Future<String> next() {
@@ -130,9 +133,10 @@ class DLNADevice {
     return request('SetPlayMode', Utf8Encoder().convert(data));
   }
 
-  Future<String> getDeviceCapabilities() {
+  Future<DeviceCapabilities> getDeviceCapabilities() async {
     final data = XmlText.getDeviceCapabilitiesXml();
-    return request('GetDeviceCapabilities', Utf8Encoder().convert(data));
+    String response = await request('GetDeviceCapabilities', Utf8Encoder().convert(data));
+    return DeviceCapabilities.fromXMLString(response);
   }
 
   Future<String> mute(bool mute) {
@@ -140,51 +144,65 @@ class DLNADevice {
     return request('SetMute', Utf8Encoder().convert(data));
   }
 
-  Future<String> getMute() {
+  Future<MuteResponse> getMute()  async {
     final data = XmlText.muteStateXml();
-    return request('GetMute', Utf8Encoder().convert(data));
+    String response = await request('GetMute', Utf8Encoder().convert(data));
+    return MuteResponse.fromXMLString(response);
   }
 
-  Future<String> volume(int volume) {
+  Future<String> setVolume(int volume) {
     final data = XmlText.volumeXml(volume);
     return request('SetVolume', Utf8Encoder().convert(data));
   }
 
-  Future<String> getVolume() {
+  Future<VolumeResponse> getVolume() async {
     final data = XmlText.volumeStateXml();
-    return request('GetVolume', Utf8Encoder().convert(data));
+    String response = await request('GetVolume', Utf8Encoder().convert(data));
+    return VolumeResponse.fromXMLString(response);
   }
+  
+  Future<String> getVolumeDBRange() async {
+    final data = XmlText.getVolumeDBRangeXml();
+    String response = await request('GetVolumeDBRange', Utf8Encoder().convert(data));
+    return response;
+  }
+}
 
-  Future<String> changeVolume(int value) async {
-    final v = VolumeParser(await getVolume()).change(value);
-    return await volume(v);
+class DLNACommandException implements Exception {
+  String message;
+  int code;
+  int httpCode;
+  final String responseData;
+
+  DLNACommandException(this.responseData, {required this.httpCode})
+    : message = 'DLNACommandException', code = 0{
+    try{
+      final xmlDocument = XmlDocument.parse(responseData);
+      var upnpError = xmlDocument.findAllElements('u:UPnPError');
+      if (upnpError.isNotEmpty) {
+        final code = upnpError.first.findAllElements("u:errorCode");
+        if (code.isNotEmpty) {
+          this.code = int.parse(code.first.innerText.trim());
+        }
+        final description = upnpError.first.findAllElements("u:errorDescription");
+        if (description.isNotEmpty) {
+          this.message = description.first.innerText.trim();
+        }
+      }
+    }
+    catch(e){
+      this.message = responseData;
+    }
+  }
+  @override
+  String toString() {
+    return 'DLNACommandException{message: $message}';
   }
 }
 
 class XmlText {
-  static String setPlayURLXml(String url,
-      {String title = "", required PlayType type}) {
-    final douyu = RegExp(r'^https?://(\d+)\?douyu$');
-    final isdouyu = douyu.firstMatch(url);
-    if (isdouyu != null) {
-      final roomId = isdouyu.group(1);
-      // 斗鱼tv的dlna server,只能指定直播间ID,不接受url资源,必须是如下格式
-      title = "roomId = $roomId, line = 0";
-    } else if (title.isEmpty) {
-      title = url;
-    }
-    var meta = '';
-    if (type == PlayType.Video) {
-      meta =
-          '''<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:sec="http://www.sec.co.kr/"><item id="false" parentID="1" restricted="0"><dc:title>$title</dc:title><dc:creator>unkown</dc:creator><upnp:class>object.item.videoItem</upnp:class><res resolution="4"></res></item></DIDL-Lite>''';
-    } else if (type == PlayType.Image) {
-      meta =
-          '''<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:sec="http://www.sec.co.kr/"><item id="false" parentID="1" restricted="0"><dc:title>$title</dc:title><dc:creator>unkown</dc:creator><upnp:class>object.item.imageItem</upnp:class><res resolution="4"></res></item></DIDL-Lite>''';
-    } else if (type == PlayType.Audio) {
-      meta =
-          '''<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:sec="http://www.sec.co.kr/"><item id="false" parentID="1" restricted="0"><dc:title>$title</dc:title><dc:creator>unkown</dc:creator><upnp:class>object.item.audioItem.musicTrack</upnp:class><res resolution="4"></res></item></DIDL-Lite>''';
-    }
-
+  static String setPlayURLXml(String url, {required URIMetadata metadata}) {
+    var meta = metadata.toXmlString();
     meta = htmlEncode(meta);
     url = htmlEncode(url);
     return '''<?xml version="1.0" encoding="utf-8" standalone="yes"?>
@@ -240,20 +258,19 @@ class XmlText {
         <s:Body>
             <u:GetPositionInfo xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
                 <InstanceID>0</InstanceID>
-                <MediaDuration />
             </u:GetPositionInfo>
         </s:Body>
     </s:Envelope>''';
   }
 
-  static String seekToXml(sk) {
+  static String seekToXml(Duration position) {
     return '''<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
 	<s:Body>
 		<u:Seek xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
 			<InstanceID>0</InstanceID>
 			<Unit>REL_TIME</Unit>
-			<Target>$sk</Target>
+			<Target>${durationToString(position)}</Target>
 		</u:Seek>
 	</s:Body>
 </s:Envelope>''';
@@ -387,6 +404,19 @@ class XmlText {
 	</s:Body>
 </s:Envelope>''';
   }
+
+  static String getVolumeDBRangeXml() {
+    return '''<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <u:GetVolumeDBRange xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">
+      <InstanceID>0</InstanceID>
+      <Channel>Master</Channel>
+    </u:GetVolumeDBRange>
+  </s:Body>
+</s:Envelope>
+''';
+  }
 }
 
 class DLNAHttp {
@@ -397,7 +427,8 @@ class DLNAHttp {
       final req = await client.getUrl(uri);
       final res = await req.close().timeout(timeout);
       if (res.statusCode != HttpStatus.ok) {
-        throw Exception("request $uri error , status ${res.statusCode}");
+        final body = await res.transform(utf8.decoder).join().timeout(timeout);
+        throw DLNACommandException(body, httpCode: res.statusCode);
       }
       final body = await res.transform(utf8.decoder).join().timeout(timeout);
       return body;
@@ -420,7 +451,7 @@ class DLNAHttp {
       final res = await req.close().timeout(timeout);
       if (res.statusCode != HttpStatus.ok) {
         final body = await res.transform(utf8.decoder).join().timeout(timeout);
-        throw Exception("request $uri error , status ${res.statusCode} $body");
+        throw DLNACommandException(body, httpCode: res.statusCode);
       }
       final body = await res.transform(utf8.decoder).join().timeout(timeout);
       return body;
